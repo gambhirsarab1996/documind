@@ -8,10 +8,13 @@ from rag.embeddings import embed_texts
 from rag.retriever import build_faiss_index, retrieve
 from rag.prompts import build_prompt, plan_query
 
+from observability.trace import build_trace
+from observability.evaluator import run_evaluation
 
 # ─────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────
+
 st.set_page_config(
     page_title="DocuMind",
     page_icon="📄",
@@ -20,10 +23,10 @@ st.set_page_config(
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-
 # ─────────────────────────────────────────
 # SESSION STATE INITIALIZATION
 # ─────────────────────────────────────────
+
 def init_session_state():
     """Initialize all session state variables."""
     defaults = {
@@ -31,64 +34,46 @@ def init_session_state():
         "faiss_index": None,
         "metadata": [],
         "doc_names": [],
-        "last_context": []
+        "last_context": [],
+        "traces": []          # ← stores per-query trace + evaluation for observability page
     }
-
     for key, value in defaults.items():
         if key not in st.session_state:
             st.session_state[key] = value
 
-
 init_session_state()
-
 
 # ─────────────────────────────────────────
 # DOCUMENT PROCESSING PIPELINE
 # ─────────────────────────────────────────
+
 def process_documents(uploaded_files):
-    """
-    Full RAG ingestion pipeline:
-    1. Load files
-    2. Chunk text
-    3. Embed chunks
-    4. Build FAISS index
-    5. Store everything in session state
-    """
     all_chunks = []
     doc_names = []
 
     for file in uploaded_files:
         pages = load_file(file)
-
         for text, page_num in pages:
             chunks = chunk_text(text, page_num, doc_name=file.name)
             all_chunks.extend(chunks)
-
         doc_names.append(file.name)
 
     if not all_chunks:
         return
 
-    # Embed in batch
     texts_only = [chunk["text"] for chunk in all_chunks]
     embeddings = embed_texts(texts_only)
-
-    # Build FAISS index
     index = build_faiss_index(embeddings)
 
-    # Store in session state
     st.session_state.faiss_index = index
     st.session_state.metadata = all_chunks
     st.session_state.doc_names = doc_names
 
-
 # ─────────────────────────────────────────
-# RAG RESPONSE GENERATION
+# RAG + OBSERVABILITY RESPONSE GENERATION
 # ─────────────────────────────────────────
-def generate_response(question: str) -> str:
-    """Generate grounded answer using multi-query retrieval."""
 
-    # Step 1 — Plan Retrieval Strategy
+def generate_response(question: str):
     plan = plan_query(question, client)
     sub_queries = plan.get("queries", [question])
     top_k = plan.get("top_k", 6)
@@ -96,22 +81,17 @@ def generate_response(question: str) -> str:
     if question not in sub_queries:
         sub_queries.append(question)
 
-    # Step 2 — Multi-Query Retrieval
     all_results = []
-
     for sub_query in sub_queries:
         query_embedding = embed_texts([sub_query])[0]
-
         results = retrieve(
             query_embedding,
             st.session_state.faiss_index,
             st.session_state.metadata,
             top_k=top_k
         )
-
         all_results.extend(results)
 
-    # Step 3 — Deduplicate Results
     unique_chunks = {}
     for chunk in all_results:
         key = (chunk["text"], chunk["page"], chunk["doc_name"])
@@ -120,13 +100,11 @@ def generate_response(question: str) -> str:
     final_chunks = list(unique_chunks.values())
     st.session_state.last_context = final_chunks
 
-    # Step 4 — Build Context
     context = "\n\n".join(
         f"[Page {r['page']} - {r['doc_name']}]\n{r['text']}"
         for r in final_chunks
     )
 
-    # Step 5 — Build Final Prompt
     final_prompt = f"""
 You are a document intelligence assistant.
 
@@ -141,56 +119,61 @@ Question:
 {question}
 """
 
-    # Step 6 — Generate Answer
     response = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {
-                "role": "system",
-                "content": "You answer questions grounded strictly in provided document context."
-            },
-            {
-                "role": "user",
-                "content": final_prompt
-            }
+            {"role": "system", "content": "You answer questions grounded strictly in provided document context."},
+            {"role": "user", "content": final_prompt}
         ],
         temperature=0
     )
 
-    return response.choices[0].message.content
+    answer = response.choices[0].message.content
 
+    trace = build_trace(
+        query=question,
+        sub_queries=sub_queries,
+        retrieved_chunks=final_chunks,
+        final_prompt=final_prompt,
+        answer=answer,
+        token_usage=response.usage.model_dump()
+    )
+
+    evaluation = run_evaluation(trace, client)
+
+    # Store full trace record for Observability page
+    st.session_state.traces.append({
+        "query": question,
+        "answer": answer,
+        "trace": trace,
+        "evaluation": evaluation
+    })
+
+    return answer, evaluation
 
 # ─────────────────────────────────────────
 # CENTRAL QUESTION HANDLER
 # ─────────────────────────────────────────
+
 def handle_question(question: str):
-    """Processes user or insight button queries."""
-    st.session_state.messages.append(
-        {"role": "user", "content": question}
-    )
+    st.session_state.messages.append({"role": "user", "content": question})
 
     with st.spinner("Thinking..."):
-        answer = generate_response(question)
+        answer, _ = generate_response(question)
 
-    st.session_state.messages.append(
-        {"role": "assistant", "content": answer}
-    )
-
+    st.session_state.messages.append({"role": "assistant", "content": answer})
 
 # ─────────────────────────────────────────
 # UI LAYOUT
 # ─────────────────────────────────────────
+
 st.title("📄 DocuMind")
 st.caption("🟢 Session-based | Documents deleted on refresh")
-st.caption("🧠 RAG-powered document intelligence")
+st.caption("🧠 RAG-powered document intelligence + Observability")
 st.divider()
 
 col1, col2 = st.columns([1, 2])
 
-
-# ─────────────────────────────────────────
-# LEFT COLUMN — DOCUMENTS & INSIGHTS
-# ─────────────────────────────────────────
 with col1:
     st.subheader("📁 Upload Documents")
 
@@ -203,7 +186,6 @@ with col1:
 
     if uploaded_files:
         uploaded_names = [f.name for f in uploaded_files]
-
         if uploaded_names != st.session_state.doc_names:
             with st.spinner("Processing documents..."):
                 process_documents(uploaded_files)
@@ -216,7 +198,6 @@ with col1:
 
     st.divider()
 
-    # Quick Insights
     st.subheader("⚡ Quick Insights")
     st.caption("Requires a document to be uploaded first")
 
@@ -234,14 +215,15 @@ with col1:
             else:
                 handle_question(prompt)
 
+    st.divider()
 
-# ─────────────────────────────────────────
-# RIGHT COLUMN — CHAT
-# ─────────────────────────────────────────
+    trace_count = len(st.session_state.get("traces", []))
+    if trace_count > 0:
+        st.info(f"🔭 **{trace_count}** query trace(s) recorded.\nView them on the **Observability** page →")
+
 with col2:
     st.subheader("💬 Chat")
 
-    # Scrollable native container
     chat_container = st.container(height=520, border=True)
 
     with chat_container:
@@ -260,18 +242,12 @@ with col2:
             handle_question(question)
             st.rerun()
 
-
-# ─────────────────────────────────────────
-# RETRIEVED CONTEXT EXPANDER
-# ─────────────────────────────────────────
 st.divider()
 
 with st.expander("🔍 Retrieved Context — Last Query"):
     if st.session_state.last_context:
         for i, chunk in enumerate(st.session_state.last_context):
-            st.markdown(
-                f"**Chunk {i+1} — Page {chunk['page']} · {chunk['doc_name']}**"
-            )
+            st.markdown(f"**Chunk {i+1} — Page {chunk['page']} · {chunk['doc_name']}**")
             st.text(chunk["text"])
             st.divider()
     else:
