@@ -1,7 +1,8 @@
 import streamlit as st
 import os
+import openai 
 from openai import OpenAI
-
+openai.api_key = os.getenv("OPENAI_API_KEY")
 from utils.file_loader import load_file
 from rag.chunking import chunk_text
 from rag.embeddings import embed_texts
