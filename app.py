@@ -77,7 +77,7 @@ def process_documents(uploaded_files):
 def generate_response(question: str):
     plan = plan_query(question, client)
     sub_queries = plan.get("queries", [question])
-    top_k = plan.get("top_k", 6)
+    top_k = plan.get("top_k", 4)
 
     if question not in sub_queries:
         sub_queries.append(question)
