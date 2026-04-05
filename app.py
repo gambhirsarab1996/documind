@@ -17,7 +17,7 @@ from observability.evaluator import run_evaluation
 # ─────────────────────────────────────────
 
 st.set_page_config(
-    page_title="DocuMind - V3",
+    page_title="DocuMind",
     page_icon="📄",
     layout="wide"
 )
@@ -168,7 +168,7 @@ def handle_question(question: str):
 # UI LAYOUT
 # ─────────────────────────────────────────
 
-st.title("📄 DocuMind")
+st.title("📄 DocuMind - V3")
 st.caption("🟢 Session-based | Documents deleted on refresh")
 st.caption("🧠 RAG-powered document intelligence + Observability")
 st.divider()
