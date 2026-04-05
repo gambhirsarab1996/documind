@@ -17,7 +17,7 @@ from observability.evaluator import run_evaluation
 # ─────────────────────────────────────────
 
 st.set_page_config(
-    page_title="DocuMind",
+    page_title="DocuMind - V3",
     page_icon="📄",
     layout="wide"
 )
